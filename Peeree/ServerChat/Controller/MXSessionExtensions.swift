@@ -7,6 +7,10 @@
 //
 
 import MatrixSDK
+import PeereeCore
+
+// Log tag.
+fileprivate let LogTag = "MXSession.Extension"
 
 extension MXSession {
 
@@ -16,7 +20,7 @@ extension MXSession {
 	func extensiveLogout(_ completion: @escaping (Swift.Error?) -> ()) {
 		logout { response in
 			if response.isFailure {
-				elog("Failed to log out successfully - still cleaning up session data.")
+				elog(LogTag, "Failed to log out successfully - still cleaning up session data.")
 			}
 			// *** roughly based on MXKAccount.closeSession(true) ***
 			self.scanManager?.deleteAllAntivirusScans()
@@ -27,7 +31,16 @@ extension MXSession {
 		}
 	}
 
+	/// Cleans up all locally saved data.
+	func clearAllData() {
+		self.scanManager?.deleteAllAntivirusScans()
+		self.aggregations?.resetData()
+		self.close()
+		self.store?.deleteAllData()
+	}
+
 	/// Fetches direct rooms recursively.
+	@ChatActor
 	private func directRoomInfosRecursive(with userId: String, directJoinedRooms: [MXRoom], idx: Int, infos: [DirectRoomInfo], _ completion: @escaping ([DirectRoomInfo]) -> Void) {
 		guard idx < directJoinedRooms.count else {
 			completion(infos)
@@ -35,8 +48,14 @@ extension MXSession {
 		}
 
 		guard directJoinedRooms[idx].summary?.membership == .join else {
-			let new = DirectRoomInfo(room: directJoinedRooms[idx], ourMembership: directJoinedRooms[idx].summary?.membership ?? .invite, theirMembership: .join)
-			self.directRoomInfosRecursive(with: userId, directJoinedRooms: directJoinedRooms, idx: idx + 1, infos: infos + [new], completion)
+			let new = DirectRoomInfo(
+				room: Room(directJoinedRooms[idx]),
+				ourMembership: directJoinedRooms[idx].summary?.membership ??
+					.invite, theirMembership: .join)
+
+			self.directRoomInfosRecursive(
+				with: userId, directJoinedRooms: directJoinedRooms,
+				idx: idx + 1, infos: infos + [new], completion)
 			return
 		}
 
@@ -44,21 +63,27 @@ extension MXSession {
 			switch response {
 			case .success(let members):
 				guard let members = members?.members else {
-					elog("members is nil")
+					elog(LogTag, "members is nil")
 					break
 				}
 
 				guard let theirMember = members.first(where: { $0.userId == userId}),
 					  let ourMember = members.first(where: { $0.userId == self.myUserId}) else {
-					elog("Cannot find our or their member.")
+					elog(LogTag, "Cannot find our or their member.")
 					break
 				}
 
-				let new = DirectRoomInfo(room: directJoinedRooms[idx], ourMembership: ourMember.membership, theirMembership: theirMember.membership)
-				self.directRoomInfosRecursive(with: userId, directJoinedRooms: directJoinedRooms, idx: idx + 1, infos: infos + [new], completion)
+				let new = DirectRoomInfo(
+					room: Room(directJoinedRooms[idx]),
+					ourMembership: ourMember.membership,
+					theirMembership: theirMember.membership)
+
+				self.directRoomInfosRecursive(
+					with: userId, directJoinedRooms: directJoinedRooms,
+					idx: idx + 1, infos: infos + [new], completion)
 
 			case .failure(let error):
-				elog("Couldn't fetch members for room \(directJoinedRooms[idx].roomId ?? "<nil>"): \(error)")
+				elog(LogTag, "Couldn't fetch members for room \(directJoinedRooms[idx].roomId ?? "<nil>"): \(error)")
 				self.directRoomInfosRecursive(with: userId, directJoinedRooms: directJoinedRooms, idx: idx + 1, infos: infos, completion)
 			}
 
@@ -66,6 +91,7 @@ extension MXSession {
 	}
 
 	/// Fetches direct rooms; safer than the MatrixSDK implementation.
+	@ChatActor
 	func directRoomInfos(with userId: String, _ completion: @escaping ([DirectRoomInfo]) -> Void) {
 		guard let directRooms = self.directRooms?[userId] else {
 			completion([])
@@ -126,9 +152,9 @@ extension MXSession {
 		}
 
 		room.members { membersResponse in
-			guard let _members = membersResponse.value, let members = _members,
+			guard let _members = membersResponse.mValue, let members = _members,
 				  let theirMember = members.members.first(where: { $0.userId == peerUserId}) else {
-				flog("We are not a member of room \(room).")
+				flog(LogTag, "We are not a member of room \(room).")
 				self.testRoom(idx: idx + 1, of: rooms, with: peerUserId, bothJoined: bothJoined, completion)
 				return
 			}
@@ -154,9 +180,9 @@ extension MXSession {
 }
 
 /// Combines scattered information on a room; currently only memberships.
-struct DirectRoomInfo {
+struct DirectRoomInfo: Sendable {
 	/// The Matrix room.
-	let room: MXRoom
+	let room: Room
 
 	/// The membership status of the local user.
 	let ourMembership: MXMembership

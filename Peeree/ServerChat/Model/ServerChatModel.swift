@@ -8,16 +8,41 @@
 
 import Foundation
 import MatrixSDK
+import PeereeCore
 
 // MARK: Functions
 
-/// The Matrix domain.
-let serverChatDomain = "chat.peeree.de"
-
-let homeServerURL = URL(string: "https://\(serverChatDomain):8448/")!
-
 /// The app group.
 let messagingAppGroup = "group.86J6LQ96WM.de.peeree.messaging"
+
+/// Initial account information.
+public struct ServerChatAccount: Sendable {
+	public let userID: String
+	public let accessToken: String
+	public let homeServer: String
+	public let deviceID: String
+	public let initialPassword: String
+
+	public init(userID: String, accessToken: String, homeServer: String,
+				deviceID: String, initialPassword: String) {
+		self.userID = userID
+		self.accessToken = accessToken
+		self.homeServer = homeServer
+		self.deviceID = deviceID
+		self.initialPassword = initialPassword
+	}
+}
+
+extension ServerChatAccount {
+	/// Creates Matrix credentials for API use.
+	var credentials: MXCredentials {
+		let creds = MXCredentials(homeServer: self.homeServer,
+								  userId: self.userID,
+								  accessToken: self.accessToken)
+		creds.deviceId = self.deviceID
+		return creds
+	}
+}
 
 extension PeerID {
 	/// Use our string representation as a server chat username.
@@ -26,8 +51,37 @@ extension PeerID {
 	}
 
 	/// Transform `peerID` into a ('fully qualified') server chat user ID.
-	public var serverChatUserId: String {
-		return "@\(serverChatUserName):\(serverChatDomain)"
+	///
+	/// - Parameter homeServerFQDN: Fully-qualified domain name of the home server, i.e. w/o port, scheme, and path.
+	public func serverChatUserId(_ homeServerFQDN: String) -> String {
+		return "@\(self.serverChatUserName):\(homeServerFQDN)"
+	}
+
+	/// - Parameter homeServerURL: Full URL of the home server.
+	public func serverChatUserId(_ homeServerURL: URL) -> String {
+		if let homeServerFQDN = homeServerURL.host {
+			return self.serverChatUserId(homeServerFQDN)
+		} else {
+			return self.serverChatUserName
+		}
+	}
+
+	/// - Parameter restClient: Matrix REST client.
+	func serverChatUserId(_ restClient: MXRestClient) -> String {
+		if let suffix = restClient.homeserverSuffix {
+			return "@\(self.serverChatUserName)" + suffix
+		} else {
+			return self.serverChatUserName
+		}
+	}
+
+	/// - Parameter credentials: Matrix credentials.
+	func serverChatUserId(_ credentials: MXCredentials) -> String {
+		if let fqdn = credentials.homeServerName() {
+			return self.serverChatUserId(fqdn)
+		} else {
+			return self.serverChatUserName
+		}
 	}
 }
 
@@ -40,45 +94,55 @@ func peerIDFrom(serverChatUserId userId: String) -> PeerID? {
 	return PeerID(uuidString: String(userId[userId.index(after: atIndex)..<colonIndex]))
 }
 
-/// Must be called as soon as possible.
-func configureServerChat() {
-	let options = MXSDKOptions.sharedInstance()
-	options.enableCryptoWhenStartingMXSession = true
-	options.disableIdenticonUseForUserAvatar = true
-	options.enableKeyBackupWhenStartingMXCrypto = false // does not work with Dendrite apparently
-	options.applicationGroupIdentifier = messagingAppGroup
-	// it currently works without this so let's keep it that way: options.authEnableRefreshTokens = true
-	options.wellknownDomainUrl = "https://\(serverChatDomain)"
-}
-
 // MARK: Types
 
-struct MessageEventData {
-	let eventID: String
-	let timestamp: Date
-	let message: String
-
+extension ChatMessage {
 	/// Extracts the ID, message and timestamp from `event`.
-	init(messageEvent event: MXEvent) throws {
+	init(messageEvent event: MXEvent, ourUserId: String) throws {
+		let errorDomain = "ChatMessage"
+
+		guard let eventId = event.eventId else {
+			throw makeUnexpectedNilError(in: "errorDomain")
+		}
+
+		self.eventID = eventId
+		self.timestamp = Date(timeIntervalSince1970: Double(event.originServerTs) / 1000.0)
+
+		if let decryptionError = event.decryptionError {
+			self.message = decryptionError.localizedDescription
+			self.type = .broken
+			return
+		}
+
 		guard event.content["format"] == nil else {
-			throw ServerChatError.parsing("Body is formatted \(String(describing: event.content["format"])), ignoring.")
+			throw makeFailedAssumptionError(
+				"Body is formatted \(String(describing: event.content["format"])).",
+				in: errorDomain)
 		}
 		let messageType = MXMessageType(identifier: event.content["msgtype"] as? String ?? "error_message_type_not_a_string")
 		guard messageType == .text || messageType == .notice else {
-			throw ServerChatError.parsing("Unsupported message type: \(messageType).")
+			throw makeFailedAssumptionError(
+				"Unsupported message type: \(messageType).", in: errorDomain)
 		}
 		guard let message = event.content["body"] as? String else {
-			throw ServerChatError.parsing("Message body not a string: \(event.content["body"] ?? "<nil>").")
+			throw makeFailedAssumptionError(
+				"Message body not a string: \(event.content["body"] ?? "<nil>").",
+				in: errorDomain)
 		}
 
-		self.eventID = event.eventId
-		self.timestamp = Date(timeIntervalSince1970: Double(event.originServerTs) / 1000.0)
 		self.message = message
+		self.type = event.sender == ourUserId ? .sent : .received
 	}
 }
 
-/// Notifications emitted by the server chat subsystem.
-public enum ServerChatNotificationName: String {
-	/// We are ready to chat with a `peerID` (sent along).
-	case readyToChat
+func makeChatMessage(messageEvent event: MXEvent, ourUserId: String) -> ChatMessage {
+	do {
+		return try ChatMessage(messageEvent: event, ourUserId: ourUserId)
+	} catch {
+		return ChatMessage(
+			eventID: event.eventId ?? "", type: .broken,
+			message: error.localizedDescription,
+			timestamp: Date(
+				timeIntervalSince1970: Double(event.originServerTs) / 1000.0))
+	}
 }

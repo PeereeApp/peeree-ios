@@ -7,83 +7,156 @@
 //
 
 import Foundation
-import MatrixSDK
+@preconcurrency import MatrixSDK
 import KeychainWrapper
+import PeereeCore
 
-/* All instance methods must be called on `ServerChatFactory.qQueue`. If they invoke a callback, that is always called on that queue as well. */
+private class CryptDelegate: MXCryptoV2MigrationDelegate {
+	init() {
+		needsVerificationUpgrade = true
+	}
+
+	var needsVerificationUpgrade: Bool {
+		didSet {
+			dlog(Self.LogTag, "needsVerificationUpgrade set to \(needsVerificationUpgrade).")
+		}
+	}
+
+	// Log tag.
+	private static let LogTag = "CryptDelegate"
+}
+
+/// Must be called as soon as possible.
+private func configureServerChat(cryptDelegate: CryptDelegate) {
+	let options = MXSDKOptions.sharedInstance()
+	options.enableCryptoWhenStartingMXSession = true
+	options.disableIdenticonUseForUserAvatar = true
+	options.enableKeyBackupWhenStartingMXCrypto = false // does not work with Dendrite apparently
+	options.enableThreads = false
+	options.authEnableRefreshTokens = false
+	options.applicationGroupIdentifier = messagingAppGroup
+	// it currently works without this so let's keep it that way: options.authEnableRefreshTokens = true
+	options.wellknownDomainUrl = "https://www.peeree.de"
+	options.cryptoMigrationDelegate = cryptDelegate
+
+	MXKeyProvider.sharedInstance().delegate = EncryptionKeyManager()
+}
+
+/* All instance methods must be called on `ServerChatFactory.qQueue`. If they invoke a callback, that is always called on that queue as well.
+ * Similarly, all static variables must be accessed from that queue. Use `use()` to get on the queue. */
 
 /// Manages the server chat account and creates sessions (`ServerChat` instances).
-public class ServerChatFactory {
+@ChatActor
+public final class ServerChatFactory {
 
-	// MARK: Static Variables
+	/// Takes a freshly created account.
+	public convenience
+	init(isTest: Bool, account: ServerChatAccount, ourPeerID peerID: PeerID,
+		 delegate: ServerChatDelegate?,
+		 conversationDelegate: (any ServerChatViewModelDelegate)?
+	) async throws {
+		self.init(isTest: isTest, ourPeerID: peerID, delegate: delegate,
+				  conversationDelegate: conversationDelegate)
 
-	/// Informed party.
-	static var delegate: ServerChatDelegate? = nil {
-		didSet {
-			use { factory in
-				factory?.serverChatController?.delegate = delegate
-			}
+		guard let passwordData = account.initialPassword
+			.data(prefixedEncoding: Self.KeychainEncoding) else {
+			throw makeEncodingError(
+				in: Self.LogTag, encoding: Self.KeychainEncoding)
 		}
-	}
 
-	/// Informed party about chats.
-	static var conversationDelegate: ServerChatConversationDelegate? = nil {
-		didSet {
-			use { factory in
-				factory?.serverChatController?.conversationDelegate = conversationDelegate
+		// remove credential remains
+
+		try? self.removePasswordFromKeychain()
+
+		try? removeGenericPasswordFromKeychain(
+			account: self.keychainAccount,
+			service: Self.AccessTokenKeychainService)
+		try? removeGenericPasswordFromKeychain(
+			account: self.keychainAccount,
+			service: Self.RefreshTokenKeychainService)
+		try? removeGenericPasswordFromKeychain(
+			account: self.keychainAccount,
+			service: Self.DeviceIDKeychainService)
+
+		do {
+			try persistPasswordInKeychain(passwordData)
+		} catch let error {
+			do {
+				try removePasswordFromKeychain()
+			} catch let removeError {
+				wlog(Self.LogTag,
+					 "Could not remove password from keychain after insert failed: \(removeError.localizedDescription)")
 			}
+
+			throw makeFailedAssumptionError(
+				"Saving server chat password failed.",
+				in: Self.LogTag, cause: error)
 		}
+
+		UserDefaults.standard.set(
+			account.homeServer, forKey: Self.HomeServerURLKey)
+
+		try self.storeCredentialsInKeychain(account.credentials)
+
+		try await self.changePassword(of: account)
 	}
 
-	/// APNs device token.
-	static var remoteNotificationsDeviceToken: Data? = nil
+	// MARK: Variables
 
-	// MARK: Static Functions
+	/// Informed party of server chat module.
+	public weak var delegate: ServerChatDelegate?
 
-	/// Retrieves server chat interaction singleton.
-	public static func chat(_ getter: @escaping (ServerChat?) -> Void) {
-		Self.use { factory in getter(factory?.serverChatController) }
-	}
-
-	/// Retrieves already logged in instance, or creates a new one by logging in.
-	public static func getOrSetupInstance(onlyLogin: Bool = false, _ completion: @escaping (Result<ServerChat, ServerChatError>) -> Void) {
-		Self.use { factory in
-			guard let f = factory else {
-				completion(.failure(.identityMissing))
-				return
-			}
-
-			if let scc = f.serverChatController {
-				completion(.success(scc))
-			} else {
-				f.setup(onlyLogin: onlyLogin, completion)
-			}
-		}
-	}
-
-	/// Retrieves a `ServerChatFactory` for the user.
-	public static func use(_ getter: @escaping (ServerChatFactory?) -> Void) {
-		AccountController.use({ ac in
-			guard let i = instance, i.peerID == ac.peerID else {
-				let newInstance = ServerChatFactory(peerID: ac.peerID)
-				instance = newInstance
-				getter(newInstance)
-				return
-			}
-
-			getter(i)
-		}, { getter(nil) })
-	}
+	/// Informed party about server chats.
+	public weak var conversationDelegate: (any ServerChatViewModelDelegate)?
 
 	// MARK: Methods
 
+	/// Creates a factory instance.
+	public init(isTest: Bool,
+				ourPeerID peerID: PeerID,
+				delegate: ServerChatDelegate?,
+				conversationDelegate: (any ServerChatViewModelDelegate)?) {
+		self.isTest = isTest
+		self.peerID = peerID
+		self.delegate = delegate
+		self.conversationDelegate = conversationDelegate
+		configureServerChat(cryptDelegate: self.cryptDelegate)
+	}
+
+	/// Retrieves server chat interaction singleton.
+	public func chat() async -> ServerChat? {
+		return self.serverChatController
+	}
+
+	/// Login, create account or get readily configured `ServerChatController`.
+	public func use(with dataSource: ServerChatDataSource)
+	async throws -> ServerChat {
+		if let scc = self.serverChatController { return scc }
+
+		do {
+			return try await resumeSession(dataSource: dataSource)
+		} catch {
+			// after we try to log in with the access token, proceed with password-based login
+			return try await self.loginProcess(dataSource: dataSource)
+		}
+	}
+
+	/// Set the token to issue remote notifications.
+	public func configureRemoteNotificationsDeviceToken(_ deviceToken: Data) async {
+		remoteNotificationsDeviceToken = deviceToken
+		await serverChatController?.configurePusher(deviceToken: deviceToken)
+	}
+
 	/// Closes the underlying session and invalidates the global ServerChatController instance.
-	public static func close() {
-		use { $0?.closeServerChat() }
+	public func closeServerChat(with error: Error? = nil) async {
+		serverChatController?.close()
+		serverChatController = nil
+
+		Task { await self.delegate?.serverChatClosed(error: error) }
 	}
 
 	/// Removes the server chat account permanently.
-	public func deleteAccount(_ completion: @escaping (ServerChatError?) -> Void) {
+	public func deleteAccount() async throws {
 		let password: String
 		do {
 			password = try self.passwordFromKeychain()
@@ -92,64 +165,52 @@ public class ServerChatFactory {
 			if nsError.code == errSecItemNotFound && nsError.domain == NSOSStatusErrorDomain {
 				// "The specified item could not be found in the keychain."
 				// This most likely means that no account exists, which we could delete, so we do not report an error here.
-				completion(nil)
+				return
 			} else {
-				completion(.fatal(error))
-			}
-			return
-		}
-
-		setup(onlyLogin: true) { loginResult in
-			switch loginResult {
-			case .failure(let error):
-				wlog("cannot login for account deletion: \(error)")
-				// do not escalate the error, as we may not have an account at all
-				completion(nil)
-
-			case .success(let sc):
-				guard let scc = sc as? ServerChatController else {
-					flog("cannot cast ServerChat to ServerChatController")
-					completion(.fatal(unexpectedNilError()))
-					return
-				}
-
-				self.isDeletingAccount = true
-
-				scc.deleteAccount(password: password) { error in
-					self.isDeletingAccount = false
-
-					if let error = error {
-						completion(error)
-						return
-					}
-
-					do { try self.removePasswordFromKeychain() } catch {
-						elog("deleting password failed: \(error)")
-					}
-					do { try removeGenericPasswordFromKeychain(account: self.keychainAccount, service: Self.AccessTokenKeychainService) } catch {
-						elog("deleting access token failed: \(error)")
-					}
-					do { try removeGenericPasswordFromKeychain(account: self.keychainAccount, service: Self.RefreshTokenKeychainService) } catch {
-						dlog("deleting refresh token failed: \(error)")
-					}
-
-					self.closeServerChat()
-
-					completion(nil)
-				}
+				throw makeFailedAssumptionError(
+					"Unexpected error while retrieving password from keychain",
+					in: Self.LogTag, cause: error)
 			}
 		}
+
+		guard let scc = self.serverChatController else {
+			throw makeUnexpectedNilError(in: Self.LogTag)
+		}
+
+		try await scc.deleteAccount(password: password)
+
+		do { try self.removePasswordFromKeychain() } catch {
+			elog(Self.LogTag, "deleting password failed: \(error)")
+		}
+
+		do {
+			try removeGenericPasswordFromKeychain(
+				account: self.keychainAccount,
+				service: Self.AccessTokenKeychainService)
+		} catch {
+			elog(Self.LogTag, "deleting access token failed: \(error)")
+		}
+
+		do {
+			try removeGenericPasswordFromKeychain(
+				account: self.keychainAccount,
+				service: Self.RefreshTokenKeychainService)
+		} catch {
+			dlog(Self.LogTag, "deleting refresh token failed: \(error)")
+		}
+
+		await self.closeServerChat()
 	}
 
 	// MARK: - Private
 
-	/// Creates a factory instance.
-	private init(peerID: PeerID) {
-		self.peerID = peerID
-		globalRestClient.completionQueue = Self.dQueue
-	}
-
 	// MARK: Static Constants
+
+	/// Log tag.
+	private static let LogTag = "ServerChatFactory"
+
+	/// Home server URL key in user defaults.
+	private static let HomeServerURLKey = "HomeServerURLKey"
 
 	/// Matrix refresh token service attribute in keychain.
 	private static let RefreshTokenKeychainService = "RefreshTokenKeychainService"
@@ -168,234 +229,256 @@ public class ServerChatFactory {
 
 	// MARK: Static Variables
 
-	/// Singleton instance.
-	private static var instance: ServerChatFactory? = nil
-
-	/// DispatchQueue for all actions on a `ServerChatFactory`; uses the `AccountController` queue for efficiency, not for logic dependence.
-	private static var dQueue: DispatchQueue { return AccountController.dQueue }
-
 	// MARK: Constants
+
+	/// Whether this is a build targeting the testing environment.
+	private let isTest: Bool
 
 	/// PeerID of the user.
 	private let peerID: PeerID
 
-	/// We need to keep a strong reference to the client s.t. it is not destroyed while requests are in flight
-	private let globalRestClient = MXRestClient(homeServer: homeServerURL) { _data in
-		flog("matrix certificate rejected: \(String(describing: _data))")
-		return false
-	}
+	/// Necessary for Matrix migrations.
+	private let cryptDelegate = CryptDelegate()
 
 	// MARK: Variables
 
 	/// Singleton instance.
 	private var serverChatController: ServerChatController? = nil
 
-	/// Keeps track of all invocations of `getOrSetupInstance` and is emptied once the first request completes.
-	private var creatingInstanceCallbacks = [(Result<ServerChat, ServerChatError>) -> Void]()
-
-	/// Keeps track of the `onlyLogin` parameters of all invocations of `getOrSetupInstance`.
-	private var creatingInstanceOnlyLoginRequests = [Bool]()
-
-	/// Whether account deletion request is in progress.
-	private var isDeletingAccount = false
+	/// APNs device token.
+	private var remoteNotificationsDeviceToken: Data? = nil
 
 	/// Matrix userId based on user's PeerID.
-	private var userId: String { return peerID.serverChatUserId }
+	private var userId: String {
+		get throws { return peerID.serverChatUserId(try self.homeServerURL) }
+	}
 
 	/// Account used for all keychain operations.
 	private var keychainAccount: String { return peerID.uuidString }
 
 	// MARK: Methods
 
-	/// Closes the underlying session and invalidates the global ServerChatController instance; must be called on `dQueue`.
-	private func closeServerChat(with error: Error? = nil) {
-		serverChatController?.close()
-		serverChatController = nil
 
-		Self.delegate?.serverChatClosed(error: error)
+	/// Perform the login.
+	private func loginProcess(dataSource: ServerChatDataSource)
+	async throws -> ServerChatController {
+		let credentials = try await login()
+		return try await self.setupInstance(with: credentials,
+											dataSource: dataSource)
 	}
 
-	/// Login, create account or get readily configured `ServerChatController`.
-	private func setup(onlyLogin: Bool = false, _ completion: @escaping (Result<ServerChat, ServerChatError>) -> Void) {
-		if let scc = serverChatController {
-			completion(.success(scc))
-			return
+	/// Changes the password of the chat account.
+	/// - Throws: `ServerChatError`
+	private func changePassword(of account: ServerChatAccount) async throws {
+		// In case we need to restore the old password.
+		guard let oldPassword = account.initialPassword.data(using: .utf8)
+		else {
+			throw makeUnexpectedNilError(in: Self.LogTag)
 		}
-
-		creatingInstanceCallbacks.append(completion)
-		creatingInstanceOnlyLoginRequests.append(onlyLogin)
-		guard creatingInstanceCallbacks.count == 1 else { return }
-
-		resumeSession { _ in
-			// after we try to log in with the access token, proceed with password-based login
-			self.loginProcess()
-		}
-	}
-
-	private func loginProcess() {
-		login { loginResult in
-			switch loginResult {
-			case .success(let credentials):
-				self.setupInstance(with: credentials)
-			case .failure(let error):
-				var reallyOnlyLogin = true
-				self.creatingInstanceOnlyLoginRequests.forEach { reallyOnlyLogin = reallyOnlyLogin && $0 }
-
-				guard !reallyOnlyLogin else {
-					self.reportCreatingInstance(result: .failure(error))
-					return
-				}
-
-				switch error {
-				case .noAccount:
-					self.createAccount { createAccountResult in
-						switch createAccountResult {
-						case .success(let credentials):
-							self.setupInstance(with: credentials)
-						case .failure(let error):
-							self.reportCreatingInstance(result: .failure(error))
-						}
-					}
-
-				default:
-					self.reportCreatingInstance(result: .failure(error))
-				}
-			}
-		}
-	}
-
-	/// Creates an account on the chat server.
-	private func createAccount(_ completion: @escaping (Result<MXCredentials, ServerChatError>) -> Void) {
-		let username = peerID.serverChatUserName
 
 		var passwordRawData: Data
 		do {
 			passwordRawData = try generateRandomData(length: Int.random(in: 24...26))
 		} catch let error {
-			completion(.failure(.fatal(error)))
-			return
+			throw makeFailedAssumptionError(
+				"failed to generate random data",
+				in: Self.LogTag, cause: error)
 		}
+
 		var passwordData = passwordRawData.base64EncodedData()
+
+		defer {
+			passwordData.resetBytes(in: 0..<passwordData.count)
+			passwordRawData.resetBytes(in: 0..<passwordRawData.count)
+		}
 
 		assert(String(data: passwordData, encoding: .utf8) == passwordRawData.base64EncodedString())
 
 		do {
-			try persistPasswordInKeychain(passwordData)
-			passwordData.resetBytes(in: 0..<passwordData.count)
+			try self.removePasswordFromKeychain()
+			try self.persistPasswordInKeychain(passwordData)
 		} catch let error {
-			do {
-				try removePasswordFromKeychain()
-			} catch let removeError {
-				wlog("Could not remove password from keychain after insert failed: \(removeError.localizedDescription)")
-			}
-
-			completion(.failure(.fatal(error)))
-			return
+			self.restore(oldPassword: oldPassword)
+			throw makeFailedAssumptionError(
+				"failed to remove old password and store new one",
+				in: Self.LogTag, cause: error)
 		}
 
-		let registerParameters: [String: Any] = ["auth" : ["type" : kMXLoginFlowTypeDummy],
-												 "username" : username,
-												 "password" : passwordRawData.base64EncodedString()]
+		let changePasswordClient = MXRestClient(credentials: account.credentials)
 
-		globalRestClient.register(parameters: registerParameters) { registerResponse in
-			switch registerResponse.toResult() {
-			case .failure(let error):
-				do {
-					try self.removePasswordFromKeychain()
-				} catch {
-					elog("Could not remove password from keychain after failed registration: \(error.localizedDescription)")
+		return try await withCheckedThrowingContinuation { continuation in
+			changePasswordClient.changePassword(
+				from: account.initialPassword,
+				to: passwordRawData.base64EncodedString(),
+				logoutDevices: true) { response in
+
+				switch response {
+				case .failure(let error):
+					defer {
+						let thrownError = makeFailedAssumptionError(
+							"failed to change password", in: Self.LogTag,
+							cause: error)
+
+						continuation.resume(throwing: thrownError)
+					}
+
+					self.restore(oldPassword: oldPassword)
+				case .success:
+					continuation.resume()
 				}
-				completion(.failure(.sdk(error)))
-
-			case .success(let responseJSON):
-				guard let mxLoginResponse = MXLoginResponse(fromJSON: responseJSON) else {
-					completion(.failure(.parsing("register response was no JSON: \(responseJSON)")))
-					return
-				}
-
-				let credentials = MXCredentials(loginResponse: mxLoginResponse, andDefaultCredentials: nil)
-
-				// Sanity check as done in MatrixSDK
-				guard credentials.userId != nil || credentials.accessToken != nil else {
-					completion(.failure(.fatal(unexpectedNilError())))
-					return
-				}
-
-				do {
-					try self.storeCredentialsInKeychain(credentials)
-				} catch {
-					completion(.failure(.fatal(error)))
-					return
-				}
-
-				// this cost me at least one week: the credentials have the port stripped, because the `home_server` field in mxLoginResponse does not contain the port …
-				credentials.homeServer = homeServerURL.absoluteString
-
-				completion(.success(credentials))
 			}
 		}
+	}
 
-		passwordRawData.resetBytes(in: 0..<passwordRawData.count)
+	/// Writes `oldPassword` to the keychain.
+	private func restore(oldPassword: Data) {
+		do {
+			try? self.removePasswordFromKeychain()
+			try self.persistPasswordInKeychain(oldPassword)
+		} catch {
+			flog(Self.LogTag, "Could not remove password from"
+				 + " keychain after failed registration: "
+				 + error.localizedDescription)
+		}
 	}
 
 	/// Set always same parameters on `credentials`.
 	private func prepare(credentials: MXCredentials) throws {
-		// this cost me at least one week: the credentials have the port stripped, because the `home_server` field in mxLoginResponse does not contain the port …
-		credentials.homeServer = homeServerURL.absoluteString
-
 		// we currently only support one device
-		credentials.deviceId = try genericPasswordFromKeychain(account: self.keychainAccount, service: Self.DeviceIDKeychainService, encoding: Self.KeychainEncoding)
+		credentials.deviceId = try genericPasswordFromKeychain(
+			account: self.keychainAccount,
+			service: Self.DeviceIDKeychainService,
+			encoding: Self.KeychainEncoding)
+	}
+
+	/// The full home server URL.
+	private var homeServerURL: URL {
+		get throws {
+			let homeServer: String
+
+			if let homeServerSetting = UserDefaults.standard
+				.string(forKey: Self.HomeServerURLKey) {
+				homeServer = homeServerSetting
+			} else {
+				// MIGRATION BRANCH FROM v1.7.1
+
+				homeServer = self.isTest ?
+				"https://test-chat.peeree.de" : "https://chat.peeree.de"
+
+				ilog(
+					Self.LogTag,
+					"migration branch from v1.7.1: home server URL not set, setting '\(homeServer)'.")
+
+				UserDefaults.standard.set(
+					homeServer,
+					forKey: Self.HomeServerURLKey)
+			}
+
+			if let url = URL(string: homeServer) {
+				return url
+			} else {
+				throw makeUnexpectedNilError(in: Self.LogTag)
+			}
+		}
 	}
 
 	/// Log into server chat account, previously created with `createAccount()`.
-	private func login(completion: @escaping (Result<MXCredentials, ServerChatError>) -> Void) {
+	private func login() async throws -> MXCredentials {
 		let password: String
 		do {
 			password = try passwordFromKeychain()
 		} catch {
-			completion(.failure(.noAccount))
-			return
+			let nsError = error as NSError
+
+			if nsError.code == errSecItemNotFound
+				&& nsError.domain == NSOSStatusErrorDomain {
+				throw ServerChatError.noAccount
+			} else {
+				throw error
+			}
 		}
 
-		globalRestClient.login(parameters: ["type" : kMXLoginFlowTypePassword,
-											"identifier" : ["type" : kMXLoginIdentifierTypeUser, "user" : userId],
-											"password" : password,
-											// Patch: add the old login api parameters to make dummy login still working
-											"user" : userId]) { response in
-			if let error = response.error as NSError?,
-			   let mxErrCode = error.userInfo[kMXErrorCodeKey] as? String,
-			   mxErrCode == "M_INVALID_USERNAME" {
-				elog("Our account seems to be deleted. Removing local password to be able to re-register.")
-				do {
-					try self.removePasswordFromKeychain()
-				} catch let pwError {
-					wlog("Removing local password failed, not an issue if not existant: \(pwError.localizedDescription)")
+		let hsURL = try self.homeServerURL
+		let ourUserId = try self.userId
+
+		// We need to keep a strong reference to the client s.t. it is not
+		// destroyed while requests are in flight
+		let bootstrapMXClient = MXRestClient(homeServer: hsURL)
+		{ _data in
+			flog(ServerChatFactory.LogTag,
+				 "matrix certificate rejected: \(String(describing: _data))")
+			return false
+		}
+		bootstrapMXClient.completionQueue = ChatActor.dQueue
+
+		return try await withCheckedThrowingContinuation(isolation: ChatActor.shared) { continuation in
+			let parameters: [String : Any] = [
+				"type" : kMXLoginFlowTypePassword,
+				"identifier" : ["type" : kMXLoginIdentifierTypeUser,
+								"user" : ourUserId],
+				"password" : password,
+				// Patch: add the old login api parameters to make dummy login working
+				"user" : ourUserId
+			]
+
+			bootstrapMXClient.login(parameters: parameters) { response in
+				if let error = response.error as NSError? {
+					defer {
+						continuation.resume(
+							throwing: makeFailedAssumptionError(
+								"Matrix login failed.",
+								in: Self.LogTag, cause: error))
+					}
+
+					if let mxErrCode = error.userInfo[kMXErrorCodeKey] as? String {
+						if mxErrCode == kMXErrCodeStringInvalidUsername {
+							elog(Self.LogTag, "Our account seems to be deleted."
+								 + " Removing password to be able to re-register.")
+							do {
+								try self.removePasswordFromKeychain()
+							} catch let pwError {
+								wlog(Self.LogTag, "Removing local password failed."
+									 + " This is not an issue if not existant."
+									 + pwError.localizedDescription)
+							}
+						}
+					}
+
+					return
 				}
+
+				guard let json = response.value else {
+					continuation.resume(throwing: makeUnexpectedNilError(in: Self.LogTag))
+					return
+				}
+				guard let loginResponse = MXLoginResponse(fromJSON: json) else {
+					continuation.resume(throwing: makeFailedAssumptionError(
+						"ERROR: Cannot create login response from JSON \(json).",
+						in: Self.LogTag))
+					return
+				}
+
+				let credentials = MXCredentials(
+					loginResponse: loginResponse,
+					andDefaultCredentials: nil)
+
+				do {
+					try self.storeCredentialsInKeychain(credentials)
+				} catch {
+					continuation.resume(
+						throwing: makeFailedAssumptionError(
+							"Storing server chat credentials in keychain failed.",
+							in: Self.LogTag, cause: error))
+					return
+				}
+
+				// this cost me at least one week: the credentials have the
+				// port stripped, because the `home_server` field in
+				// mxLoginResponse does not contain the port …
+				credentials.homeServer = hsURL.absoluteString
+
+				continuation.resume(returning: credentials)
 			}
-
-			guard let json = response.value else {
-				elog("Login response is nil.")
-				completion(.failure(.fatal(unexpectedNilError())))
-				return
-			}
-			guard let loginResponse = MXLoginResponse(fromJSON: json) else {
-				completion(.failure(.parsing("ERROR: Cannot create login response from JSON \(json).")))
-				return
-			}
-
-			let credentials = MXCredentials(loginResponse: loginResponse, andDefaultCredentials: self.globalRestClient.credentials)
-
-			do {
-				try self.storeCredentialsInKeychain(credentials)
-			} catch {
-				completion(.failure(.fatal(error)))
-				return
-			}
-
-			// this cost me at least one week: the credentials have the port stripped, because the `home_server` field in mxLoginResponse does not contain the port …
-			credentials.homeServer = homeServerURL.absoluteString
-
-			completion(.success(credentials))
 		}
 	}
 
@@ -403,7 +486,7 @@ public class ServerChatFactory {
 	private func storeCredentialsInKeychain(_ credentials: MXCredentials) throws {
 		guard let accessToken = credentials.accessToken,
 			  let deviceId = credentials.deviceId else {
-			throw unexpectedNilError()
+			throw makeUnexpectedNilError(in: Self.LogTag)
 		}
 
 		// possible old tokens are automatically overridden
@@ -417,28 +500,49 @@ public class ServerChatFactory {
 	}
 
 	/// Tries to create a new session with a previous access token; prevents from creating new devices in Dendrite.
-	private func resumeSession(_ failure: @escaping (ServerChatError) -> Void) {
+	/// - Throws: `ServerChatError`
+	private func resumeSession(dataSource: ServerChatDataSource)
+	async throws -> ServerChatController {
 		do {
-			let token = try genericPasswordFromKeychain(account: keychainAccount, service:  Self.AccessTokenKeychainService, encoding: Self.KeychainEncoding)
-			let creds = MXCredentials(homeServer: homeServerURL.absoluteString, userId: userId, accessToken: token)
+			let token = try genericPasswordFromKeychain(
+				account: self.keychainAccount,
+				service: Self.AccessTokenKeychainService,
+				encoding: Self.KeychainEncoding)
+
+			let creds = MXCredentials(
+				homeServer: try self.homeServerURL.absoluteString,
+				userId: try self.userId, accessToken: token)
+
 			try self.prepare(credentials: creds)
 			if let refreshToken = try? genericPasswordFromKeychain(account: keychainAccount, service: Self.RefreshTokenKeychainService, encoding: Self.KeychainEncoding) {
 				creds.refreshToken = refreshToken
 			}
-			setupInstance(with: creds, failure)
+
+			return try await setupInstance(with: creds, dataSource: dataSource)
+		} catch let error as AudiencedError {
+			throw error
 		} catch let error {
-			failure(.fatal(error))
+			throw makeFailedAssumptionError(
+				"Matrix session cannot be resumed",
+				in: Self.LogTag, cause: error)
 		}
 	}
 
 	/// Sets the `serverChatController` singleton and starts the server chat session.
-	private func setupInstance(with credentials: MXCredentials, _ failure: ((ServerChatError) -> Void)? = nil) {
+	/// - Throws: `ServerChatError`
+	private func setupInstance(with credentials: MXCredentials,
+							   dataSource: ServerChatDataSource
+	) async throws -> ServerChatController {
+
 		let restClient: MXRestClient = MXRestClient(credentials: credentials, unrecognizedCertificateHandler: { data in
-			flog("server chat certificate is not trusted.")
-			Self.delegate?.serverChatCertificateIsInvalid()
+			Task {
+				await self.delegate?.serverChatError(makeExternalError(
+					"server chat certificate is not trusted.", in: Self.LogTag))
+			}
+
 			return false
 		}, persistentTokenDataHandler: { callback in
-			dlog("server chat persistentTokenDataHandler was called.")
+			dlog(Self.LogTag, "server chat persistentTokenDataHandler was called.")
 			// Block called when the rest client needs to check the persisted refresh token data is valid and optionally persist new refresh data to disk if it is not.
 			callback?([credentials]) { shouldPersist in
 				// credentials (access and refresh token) changed during refresh
@@ -452,63 +556,84 @@ public class ServerChatFactory {
 			// Block called when the rest client has become unauthenticated(E.g. refresh failed or server invalidated an access token).
 			// A client that receives such a response can try to refresh its access token, if it has a refresh token available. If it does not have a refresh token available, or refreshing fails with soft_logout: true, the client can acquire a new access token by specifying the device ID it is already using to the login API.
 
-			guard let strongSelf = self, !strongSelf.isDeletingAccount else { return }
+			guard let strongSelf = self else { return }
 
-			if let error = mxError {
-				flog("server chat session became unauthenticated (soft logout: \(isSoftLogout), refresh token: \(isRefreshTokenAuth)) \(error.errcode ?? "<nil>"): \(error.error ?? "<nil>")")
-			} else {
-				flog("server chat session became unauthenticated (soft logout: \(isSoftLogout), refresh token: \(isRefreshTokenAuth))")
+			guard let mxError else {
+				flog(Self.LogTag, "server chat session became unauthenticated"
+					 + " (soft logout: \(isSoftLogout), refresh token:"
+					 + " \(isRefreshTokenAuth))")
+				return
 			}
 
-			Self.dQueue.async {
-				strongSelf.closeServerChat(with: mxError?.createNSError())
+			ilog(Self.LogTag, "server chat session became unauthenticated"
+				 + " (soft logout: \(isSoftLogout), refresh token: "
+				 + "\(isRefreshTokenAuth)) \(mxError.errcode ?? "<nil>"): "
+				 + "\(mxError.error ?? "<nil>")")
 
+			if !isSoftLogout && !isRefreshTokenAuth
+				&& mxError.errcode == kMXErrCodeStringUnknownToken {
+				Task {
+					// Our token was removed, probably due to an upgrade of the Matrix server.
+					// We need to remove it, s.t. password auth is again used to log in.
+					do {
+						try removeGenericPasswordFromKeychain(
+							account: strongSelf.keychainAccount,
+							service: Self.AccessTokenKeychainService)
+					} catch {
+						elog(Self.LogTag, "deleting access token after it"
+							 + " became invalid failed: \(error)")
+					}
+
+					do {
+						try removeGenericPasswordFromKeychain(
+							account: strongSelf.keychainAccount,
+							service: Self.RefreshTokenKeychainService)
+					} catch {
+						dlog(Self.LogTag, "deleting refresh token after it"
+							 + " became invalid failed: \(error)")
+					}
+
+					// we do not pass the error up the chain
+					await strongSelf.closeServerChat(with: nil)
+
+					completion?()
+				}
+			} else {
 				completion?()
 			}
 		})
 
-		restClient.completionQueue = Self.dQueue
+		restClient.completionQueue = ChatActor.dQueue
 
-		let setupCallback: ([PeerID : Date]) -> () = { lastReads in
-			let c = ServerChatController(peerID: self.peerID, restClient: restClient, dQueue: Self.dQueue, lastReads: lastReads, conversationQueue: DispatchQueue.main)
+		let c = ServerChatController(
+			peerID: self.peerID, restClient: restClient,
+			dataSource: dataSource)
 
-			c.start { error in Self.dQueue.async {
-				if let error {
-					c.close()
-					if let cb = failure {
-						// let the callee handle the error
-						cb(.sdk(error))
-					} else {
-						// we finish here
-						self.reportCreatingInstance(result: .failure(.sdk(error)))
-					}
-				} else {
-					self.serverChatController = c
-					c.delegate = Self.delegate
-					c.conversationDelegate = Self.conversationDelegate
+		let _ = await Task { @ChatActor in
+			c.conversationDelegate = self.conversationDelegate
+			c.delegate = self.delegate
+		}.value
 
-					// configure the pusher if server chat account didn't exist when AppDelegate.didRegisterForRemoteNotificationsWithDeviceToken() is called
-					Self.remoteNotificationsDeviceToken.map { c.configurePusher(deviceToken: $0) }
+		do {
+			try await c.start()
 
-					self.reportCreatingInstance(result: .success(c))
-				}
-			} }
-		}
+			self.serverChatController = c
 
-		if let d = Self.delegate {
-			d.getLastReads(setupCallback)
-		} else {
-			wlog("no server chat delegate set in setupInstance().")
-			setupCallback([:])
+			// configure the pusher if server chat account didn't exist when
+			// AppDelegate.didRegisterForRemoteNotificationsWithDeviceToken()
+			// is called
+			if let token = self.remoteNotificationsDeviceToken {
+				await c.configurePusher(deviceToken: token)
+			}
+
+			return c
+		} catch {
+			c.close()
+			throw makeFailedAssumptionError(
+				"Starting Matrix session failed.",
+				in: Self.LogTag, cause: error)
 		}
 	}
-
-	/// Concludes registration process; must be called on the main thread!
-	private func reportCreatingInstance(result: Result<ServerChat, ServerChatError>) {
-		creatingInstanceCallbacks.forEach { $0(result) }
-		creatingInstanceCallbacks.removeAll()
-	}
-
 
 	// MARK: Keychain Access
 
@@ -522,35 +647,16 @@ public class ServerChatFactory {
 
 	/// Retrieves our account's password from the keychain.
 	private func passwordFromKeychain() throws -> String {
-		do {
-			// try to retrieve the password the old way
-			let password = try internetPasswordFromKeychain(account: userId, url: homeServerURL)
-
-			// migrate it to new storage
-			do {
-				guard let pwData = password.data(using: Self.KeychainEncoding) else {
-					throw unexpectedNilError()
-				}
-
-				try persistPasswordInKeychain(pwData)
-				try removeInternetPasswordFromKeychain(account: userId, url: homeServerURL)
-			} catch {
-				elog("password migration failed: \(error)")
-			}
-
-			return password
-		} catch {
-			// the new way
-			return try genericPasswordFromKeychain(account: keychainAccount, service: Self.ServerChatPasswordKeychainService, encoding: Self.KeychainEncoding)
-		}
+		return try genericPasswordFromKeychain(
+			account: keychainAccount,
+			service: Self.ServerChatPasswordKeychainService,
+			encoding: Self.KeychainEncoding)
 	}
 
 	/// force-delete local account information. Only use as a last resort!
 	private func removePasswordFromKeychain() throws {
-		do {
-			try removeInternetPasswordFromKeychain(account: userId, url: homeServerURL)
-		} catch {
-			try removeGenericPasswordFromKeychain(account: keychainAccount, service: Self.ServerChatPasswordKeychainService)
-		}
+		try removeGenericPasswordFromKeychain(
+			account: keychainAccount,
+			service: Self.ServerChatPasswordKeychainService)
 	}
 }

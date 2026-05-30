@@ -19,11 +19,26 @@
 /* Title of alert */
 "Account Creation Failed" = "Account Creation Failed";
 
+/* Title of alert */
+"Account Unavailable" = "Account Unavailable";
+
 /* Title of identity creation alert */
 "Agreement to Terms of Use" = "Agreement to Terms of Use";
 
-/* Alert message if the user is about to pin someone who did not yet authenticate himself */
-"Be careful: the identity of this person is not verified, you may attempt to pin someone malicious!" = "Be careful: the identity of this person is not verified, you may attempt to pin someone malicious!";
+/* Low-level API error */
+"API programming error." = "API programming error.";
+
+/* Low-level API error */
+"Severe API programming error." = "Severe API programming error.";
+
+/* Low-level API error */
+"Unknown API error %d." = "Unknown API error %d.";
+
+/* Error title */
+"Bluetooth Advertising Failed" = "Bluetooth Advertising Failed";
+
+/* Low-level error */
+"Bluetooth Initialization Failed" = "Bluetooth Initialization Failed";
 
 /* Error title */
 "Bluetooth Publish Failed" = "Bluetooth Publish Failed";
@@ -38,7 +53,7 @@
 "bio_placeholder" = "Your biography.";
 
 /* Content of broken room alert. */
-"broken_chatroom_content" = "Your chat room with '%@' seems to be broken, because the decryption of a message failed (%@). You may re-create the room to fix the error, but this will delete all your messages.";
+"broken_chatroom_content" = "This chat room seems to be broken, because the decryption of a message failed. You may re-create the room to fix the error, but this will delete all your messages.";
 
 /* Camera of the device. */
 "Camera" = "Camera";
@@ -50,7 +65,7 @@
 "Cannot Join Room" = "Cannot Join Room";
 
 /* Error message title */
-"Chat Server Account Creation Failed" = "Chat Server Account Creation Failed";
+"Chat Account Creation Failed" = "Chat Account Creation Failed";
 
 /* Title of alert dialog */
 "Chat Unavailable" = "Chat Unavailable";
@@ -82,14 +97,23 @@
 /* Caption of button */
 "Create Identity" = "Create Identity";
 
+/* Caption of button */
+"Creating Identity …" = "Creating Identity …";
+
 /* User-facing security error. */
 "chat_server_cert_invalid" = "Chat server certificate is invalid. The security of the connection cannot be guaranteed and thus it was cancelled.";
+
+/* Title of alert. */
+"Decoding Persisted Chat Data Failed" = "Decoding Persisted Chat Data Failed";
 
 /* Low-level error */
 "Decoding Recent Peers Failed" = "Decoding Recent Peers Failed";
 
 /* Caption of button */
 "Delete Identity" = "Delete Identity";
+
+/* Caption of button */
+"Deleting Identity …" = "Deleting Identity …";
 
 /* Button caption for removing the users portrait image */
 "Delete Portrait" = "Delete Portrait";
@@ -117,6 +141,12 @@
 
 /* Content of onboarding description paragraph. */
 "Efficient content" = "Data transmitted to our server is limited to the absolute necessary, conserving your battery and data.";
+
+/* Placeholder for missing biography */
+"Empty Biography." = "Empty Biography.";
+
+/* Title of alert. */
+"Encoding Persisted Chat Data Failed" = "Encoding Persisted Chat Data Failed";
 
 /* Low-level error */
 "Encoding Recent Peers Failed" = "Encoding Recent Peers Failed";
@@ -150,6 +180,9 @@
 
 /* Subhead of placeholder cell in Pin Matches view. */
 "Go online and pin new people!" = "Go online and pin new people!";
+
+/* Low-level error */
+"Going Online Failed" = "Going Online Failed";
 
 /* Peeree Homepage */
 "https://www.peeree.de/en/index.html" = "https://www.peeree.de/en/index.html";
@@ -226,17 +259,20 @@
 /* For whatever reason there is no description available for this Character Trait. */
 "No description available." = "No description available.";
 
+/* Placeholder for PeerID */
+"No identity." = "No identity.";
+
 /* Subhead of the placeholder shown in browse view if no peers are around. */
 "No Peeree users around." = "No Peeree users around.";
 
 /* Heading of placeholder cell in Pin Matches view. */
 "No Pin Matches Yet" = "No Pin Matches Yet";
 
+/* A chat function was used but the account is not available. */
+"No chat account yet." = "No chat account yet.";
+
 /* Low level error. */
 "no public key derivable" = "no public key derivable";
-
-/* Verification status of peer */
-"not verified" = "not verified";
 
 /* Heading of the placeholder shown in browse view if no peers are around. */
 "Looking out…" = "Looking out…";
@@ -277,11 +313,11 @@
 /* The user wants to pin a person */
 "Pin" = "Pin";
 
-/* The user wants to pin the person, whose name is given in the format argument */
-"Pin %@" = "Pin %@";
-
 /* Title of in-app error notification */
 "Pin Failed" = "Pin Failed";
+
+/* Error message title */
+"Pin Match Check Failed" = "Pin Match Check Failed";
 
 /* Notification alert body when a pin match occured. */
 "Pin Match with %@!" = "Pin Match with %@!";
@@ -299,7 +335,7 @@
 "Private" = "Private";
 
 /* Content of onboarding description paragraph. */
-"Private content" = "We do not collect any of your personal data. Only an opaque ID is sent to our servers. This ID is not related to your personal identity.";
+"Private content" = "We do not collect any of your personal data. Only a pseudonymous ID is sent to our servers. All chats are end-to-end encrypted.";
 
 /* Trait */
 "privateness" = "Privateness";
@@ -337,8 +373,8 @@
 /* Title of sequence number reset failure alert */
 "Resetting Server Nonce Failed" = "Resetting Server Nonce Failed";
 
-/* The user wants to retry verifying peer */
-"Retry verify" = "Retry verify";
+/* Error title */
+"Restart Bluetooth Advertising Failed" = "Restart Bluetooth Advertising Failed";
 
 /* Trait */
 "ruleAwareness" = "Rule Awareness";
@@ -371,7 +407,7 @@
 "server_chat_controller_nil" = "No connection to the chat server.";
 
 /* Title of in-app alert. */
-"Chat Server Account Deletion Failed" = "Chat Server Account Deletion Failed";
+"Chat Account Deletion Failed" = "Chat Account Deletion Failed";
 
 /* Error when an account creation request response is malformed */
 "Server did provide malformed or no account information" = "Server did provide malformed or no account information";
@@ -439,17 +475,14 @@
 /* Peeree App Terms of Use URL */
 "terms-app-url" = "https://www.peeree.de/en/terms-app.html";
 
+/* Title of alert */
+"Unexpected Error" = "Unexpected Error";
+
 /* Requested information about an unknown peer. */
 "Unknown peer." = "Unknown peer.";
 
 /* Alert action button title */
 "Unpin" = "Unpin";
-
-/* Title of the alert which pops up when the user is about to pin an unverified peer */
-"Unverified Peer" = "Unverified Peer";
-
-/* Verification status of peer */
-"verified" = "verified";
 
 /* Caption of identity creation alert action. */
 "View Terms" = "View Terms";
@@ -484,3 +517,225 @@
 // we ignore the args here, since the user would only be the PeerID:
 "MSG_FROM_USER" = "New Message";
 "USER_INVITE_TO_CHAT" = "New Pin Match!";
+
+/********************************************/
+/* macOS keys. */
+"NSMenuItemTitleAbout" = "About";
+
+"NSMenuItemTitleHide" = "Hide";
+
+"NSMenuItemTitleQuit" = "Quit";
+
+/********************************************/
+/* SwiftUI keys. */
+"Offline" = "Offline";
+
+"Create your profile." = "Create your profile.";
+
+"Setup filter." = "Setup filter.";
+
+"Demo" = "Demo";
+
+"Peeree is all about Pinning. Pin people you find interesting. If the pin is mutual, you can start chatting." = "Peeree is all about Pinning. Pin people you find interesting. If the pin is mutual, you can start chatting.";
+
+"Learn more about how Peeree works" = "Learn more about how Peeree works";
+
+"Swipe up or tap to find new people." = "Swipe up or tap to find new people.";
+
+"Pinboard" = "Pinboard";
+
+"%@ is not yet ready to chat." = "%@ is not yet ready to chat.";
+
+"To ensure the confidentiality of your messages, chat is only available after %@ opened the app." = "To ensure the confidentiality of your messages, chat is only available after %@ opened the app.";
+
+"PortraitPlaceholder" = "PortraitPlaceholder";
+
+"Biography" = "Biography";
+
+"Birthday" = "Birthday";
+
+"Female" = "Female";
+
+"Male" = "Male";
+
+"Queer" = "Queer";
+
+"Gender" = "Gender";
+
+"Show Age on Profile" = "Show Age on Profile";
+
+"Name" = "Name";
+
+"Preview" = "Preview";
+
+"Privacy Policy" = "Privacy Policy";
+
+"Website" = "Website";
+
+"Remove the pin or report the portrait of %@." = "Remove the pin or report the portrait of %@.";
+
+"Unpin or Report" = "Unpin or Report";
+
+"Females" = "Females";
+
+"Males" = "Males";
+
+"Queers" = "Queers";
+
+"Minimum Age:" = "Minimum Age:";
+
+"Maximum Age:" = "Maximum Age:";
+
+"Minimum Age" = "Minimum Age";
+
+"Maximum Age" = "Maximum Age";
+
+"Only with age available" = "Only with age available";
+
+"Only with picture available" = "Only with picture available";
+
+"Filter based on gender." = "Filter based on gender.";
+
+"Age" = "Age";
+
+"Filter based on age." = "Filter based on age.";
+
+"Display filtered people" = "Display filtered people";
+
+"Portrait" = "Portrait";
+
+"Filter based on portrait." = "Filter based on portrait.";
+
+"Display people although they are filtered out. Notifications are still not triggered." = "Display people although they are filtered out. Notifications are still not triggered.";
+
+"Biography:" = "Biography:";
+
+"Pin Match!" = "Pin Match!";
+
+"Online – Looking for people." = "Online – Looking for people.";
+
+"Filter" = "Filter";
+
+"Profile" = "Profile";
+
+"Visit crowded places to find other Peeree users." = "Visit crowded places to find other Peeree users.";
+
+"A person." = "A person.";
+
+"PinTemplate" = "Pin Button";
+
+"%lld" = "%lld";
+
+"Use this button to pin people." = "Use this button to pin people.";
+
+"Waiting for a response …" = "Waiting for a response …";
+
+"The person is pinned." = "The person is pinned.";
+
+"Trying to remove the pin …" = "Trying to remove the pin …";
+
+"Pin Match! You can now chat with the person." = "Pin Match! You can now chat with this person.";
+
+"Lot's of void out here!" = "Lot's of void out here!";
+
+"Sounds good!" = "Sounds good!";
+
+"No biography." = "No biography.";
+
+"Tap to show biography." = "Tap to show biography.";
+
+"Create an identity in your profile to be able to pin people." = "Create an identity in your profile to be able to pin people.";
+
+"Your Peeree Identity" = "Your Peeree Identity";
+
+"Unique identity in the Peeree network." = "Unique identity in the Peeree network.";
+
+"Restore Identity" = "Restore Identity";
+
+/* Placeholder text */
+"No messages." = "No messages.";
+
+"The Peeree Way" = "The Peeree Way";
+
+"Load older messages …" = "Load older messages …";
+
+/***************************** Recovery View **********************************/
+
+"Account Recovery" = "Account Recovery";
+
+"Enter your recovery phrase." = "Enter your recovery phrase.";
+
+"Your secret recovery phrase." = "Your secret recovery phrase.";
+
+"This will log you out on any other device." = "This will log you out on any other device.";
+
+"It is not possible to view this code again." = "It is not possible to view this code again.";
+
+"Recover Account" = "Recover Account";
+
+"Save Code" = "Save Code";
+
+"Share" = "Share";
+
+"Copy to Clipboard" = "Copy to Clipboard";
+
+"Save in iCloud" = "Save in iCloud";
+
+"Recovering your account overrides all data, except for your profile." = "Recovering your account overrides all data, except for your profile.";
+
+"Export code for save storage." = "Export code for save storage.";
+
+"Saved to iCloud." = "Saved to iCloud.";
+
+"Type or paste your code." = "Type or paste your code.";
+
+"Store your code in a secure and durable location, e.g. a password manager." = "Store your code in a secure and durable location, e.g. a password manager.";
+
+"" = "";
+
+/****************************** PeereeSocial **********************************/
+
+/* Low level IdP error */
+"IdP programming error." = "IdP programming error.";
+
+/* Low level IdP error */
+"Severe IdP programming error." = "Severe IdP programming error.";
+
+/* Low level IdP error */
+"Too many requests to IdP." = "Too many requests to IdP.";
+
+/* Low level IdP error */
+"IdP server error." = "IdP server error.";
+
+/* Low level IdP error */
+"Unknown IdP error %d." = "Unknown IdP error %d.";
+
+/********************************************/
+/* App Store Screenshot keys. */
+
+/* Demo */
+"Photo from Unsplash by %@." = "Photo from Unsplash by %@.";
+
+/* Demo */
+"Working on it ..." = "Working on it ...";
+
+/* Demo */
+"I'll be there." = "I'll be there.";
+
+/* Demo */
+"Sounds good, count me in!" = "Sounds good, count me in!";
+
+/* Demo */
+"Vicki Vale, Vicki Vale, Vicki Vale, …" = "Vicki Vale, Vicki Vale, Vicki Vale, …";
+
+/* Demo */
+"I hope I'm not interrupting." = "I hope I'm not interrupting.";
+
+/* Demo */
+"No, not at all." = "No, not at all.";
+
+/* Demo */
+"It’s from Batman." = "It’s from Batman.";
+
+/* Demo */
+"Because that makes it better." = "Because that makes it better.";

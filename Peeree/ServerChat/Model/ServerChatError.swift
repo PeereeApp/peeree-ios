@@ -7,9 +7,10 @@
 //
 
 import Foundation
+import PeereeCore
 
 /// Causes for `ServerChatError.cannotChat` error.
-public enum ServerChatCannotChatReason {
+public enum ServerChatCannotChatReason: Sendable {
 	/// This user has no chat profile.
 	case noProfile
 
@@ -33,13 +34,4 @@ public enum ServerChatError: Error {
 
 	/// Thrown when we are not able to chat with a peer for `reason`.
 	case cannotChat(PeerID, ServerChatCannotChatReason)
-
-	/// Parsing a server response failed; passes a localized error message.
-	case parsing(String)
-
-	/// Passes on an error produced by the SDK.
-	case sdk(Error)
-
-	/// Passes on a fatal error.
-	case fatal(Error)
 }

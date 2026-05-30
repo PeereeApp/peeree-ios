@@ -8,179 +8,181 @@
 
 import Foundation
 import CoreGraphics
+import CryptoKit
 
-public protocol PersistedPeersControllerDelegate {
-	func persistedPeersLoadedFromDisk(_ peers: Set<Peer>)
-	func persistedBiosLoadedFromDisk(_ bios: [PeerID : String])
-	func persistedLastReadsLoadedFromDisk(_ lastReads: [PeerID : Date])
-	func portraitLoadedFromDisk(_ portrait: CGImage, of peerID: PeerID, hash: Data)
-	func encodingFailed(with error: Error)
-	func decodingFailed(with error: Error)
-}
+import PeereeCore
 
 /// This is basically an actor around a set of PeerInfos. It is simple and stupid, but doesn't need optimization yet.
-public final class PersistedPeersController {
+internal actor PersistedPeersController {
 	// MARK: - Public and Internal
 
-	public init(filename: String, targetQueue: DispatchQueue) {
+	public init(filename: String) {
 		self.filename = filename
-		self.targetQueue = targetQueue
 	}
 
 	// MARK: Variables
 
-	public var delegate: PersistedPeersControllerDelegate? = nil
+	/// All saved peer data.
+	private(set) var persistedPeers = Set<Peer>()
+
+	/// Last encounter of PeerID via Bluetooth.
+	private(set) var lastSeenDates: [PeerID : Date] = [:]
 
 	// MARK: Methods
 
 	/// Wipes all data from disk.
 	public func clear() {
-		targetQueue.async {
-			let peers = self.persistedPeers
-			let blobs = self.persistedBlobs
-			PersistedPeersController.persistenceQueue.async {
-				try? self.deleteFile(at: self.biosURL)
-				try? self.deleteFile(at: self.lastReadsURL)
-				try? self.deleteFile(at: self.peersURL)
-				for peer in peers {
-					try? self.deleteFile(at: self.pictureURL(of: peer.id.peerID))
-				}
-				for blob in blobs {
-					try? self.deleteFile(at: self.pictureURL(of: blob.key))
-				}
-			}
-			self.persistedPeers = Set<Peer>()
-			self.persistedBlobs = [:]
-			self.persistedLastReads = [:]
+		// Deleting from less to most important files.
+		try? fileManager.deleteFile(at: self.thumbnailBaseURL)
+		try? fileManager.deleteFile(at: self.biosURL)
+		for peer in self.persistedPeers {
+			try? fileManager.deleteFile(at: self.pictureURL(of: peer.id.peerID))
 		}
+		for blob in self.persistedBlobs {
+			try? fileManager.deleteFile(at: self.pictureURL(of: blob.key))
+		}
+
+		try? fileManager.deleteFile(at: self.peersURL)
+
+		self.persistedPeers = Set<Peer>()
+		self.persistedBlobs = [:]
 	}
 
 	/// Read-only access to persisted peers.
-	public func readPeers(completion: @escaping (Set<Peer>) -> ()) {
-		targetQueue.async { completion(self.persistedPeers) }
+	public func readPeer(_ peerID: PeerID) -> Peer? {
+		self.persistedPeers.first { $0.id.peerID == peerID }
 	}
 
 	/// Adds peers to the persisted peers set.
-	public func addPeers(query: @escaping () -> (Set<Peer>)) {
-		targetQueue.async {
-			self.persistedPeers.formUnion(query())
-			self.savePeers()
-		}
+	public func addPeers(_ peers: Set<Peer>) throws {
+		self.persistedPeers.formUnion(peers)
+		try self.savePeers()
 	}
 
 	/// Either edit properties of a peer, delete it from the list (by setting the inout value to nil) or simply find out if it exists in the list.
-	public func modify(peerID: PeerID, query: @escaping (inout Peer?) -> ()) {
-		targetQueue.async {
-			// find old peer and remove it, if it was present
-			var peer = self.persistedPeers.first { $0.id.peerID == peerID }
-			_ = peer.map { self.persistedPeers.remove($0) }
+	public func modify(peerID: PeerID, query: @escaping (inout Peer?) -> ()) throws {
+		// find old peer and remove it, if it was present
+		var peer = self.persistedPeers.first { $0.id.peerID == peerID }
+		_ = peer.map { self.persistedPeers.remove($0) }
 
-			query(&peer)
+		query(&peer)
 
-			// only re-add the peer if it was set
-			_ = peer.map { self.persistedPeers.insert($0) }
+		// only re-add the peer if it was set
+		_ = peer.map { self.persistedPeers.insert($0) }
 
-			// if we run into performance issues, we could check here if really something was modified
-			self.savePeers()
-		}
+		// if we run into performance issues, we could check here if really something was modified
+		try self.savePeers()
 	}
 
-	/// Removes the returned `Peer` instances of `query` from the persisted peers set and whipes them and all associated data from disk.
-	public func removePeers(_ peers: Set<Peer>) {
-		targetQueue.async {
-			self.persistedPeers.subtract(peers)
-			for peer in peers {
-				self.persistedBlobs.removeValue(forKey: peer.id.peerID)
-				self.persistedLastReads.removeValue(forKey: peer.id.peerID)
-			}
-			PersistedPeersController.persistenceQueue.async {
-				for peer in peers {
-					try? self.deleteFile(at: self.pictureURL(of: peer.id.peerID))
-				}
-			}
-			self.savePeers()
-			self.saveBios()
-			self.saveLastReads()
-		}
+	/// Set last seen date of peer.
+	public func updateLastSeen(_ lastSeen: Date, of peerID: PeerID) {
+		self.lastSeenDates[peerID] = lastSeen
+		archiveObjectInUserDefs(
+			self.lastSeenDates as NSDictionary, forKey: Self.LastSeenKey)
 	}
 
-	/// Reads optional peer data.
-	public func readBlob(of peerID: PeerID, completion: @escaping (PeerBlobData) -> ()) {
-		targetQueue.async { completion(self.persistedBlobs[peerID] ?? PeerBlobData()) }
+	/// Removes `peers` from the persisted peers set and whipes them and all associated data from disk.
+	public func removePeers(_ peers: Set<Peer>) throws {
+		self.persistedPeers.subtract(peers)
+		for peer in peers {
+			self.persistedBlobs.removeValue(forKey: peer.id.peerID)
+		}
+
+		for peer in peers {
+			try? fileManager.deleteFile(at: self.pictureURL(of: peer.id.peerID))
+		}
+
+		try self.savePeers()
+		try self.saveBios()
 	}
 
 	/// Persists optional peer data.
-	public func writeBlob(of peerID: PeerID, completion: @escaping (inout PeerBlobData) -> ()) {
-		targetQueue.async {
-			let oldBlob = self.persistedBlobs[peerID, default: PeerBlobData()]
-			var modifiedBlob = oldBlob
-			completion(&modifiedBlob)
-			self.persistedBlobs[peerID] = modifiedBlob
-			if modifiedBlob.biography != oldBlob.biography {
-				self.saveBios()
-			}
-			if modifiedBlob.portrait != oldBlob.portrait {
-				self.save(portrait: modifiedBlob.portrait, of: peerID)
-			}
+	public func writeBlob(of peerID: PeerID, query: @escaping (inout PeerBlobData) -> ()) throws {
+		let oldBlob = self.persistedBlobs[peerID, default: PeerBlobData()]
+
+		var modifiedBlob = oldBlob
+		query(&modifiedBlob)
+		self.persistedBlobs[peerID] = modifiedBlob
+
+		if modifiedBlob.biography != oldBlob.biography {
+			try self.saveBios()
 		}
-	}
-
-	/// Read-only access to persisted last read dates.
-	public func readLastReads(completion: @escaping ([PeerID : Date]) -> ()) {
-		targetQueue.async { completion(self.persistedLastReads) }
-	}
-
-	/// Persists persisted last read date of `peerID`.
-	public func set(lastRead date: Date, of peerID: PeerID) {
-		targetQueue.async {
-			self.persistedLastReads[peerID] = date
-			self.saveLastReads()
+		if modifiedBlob.portrait != oldBlob.portrait {
+			try self.save(portrait: modifiedBlob.portrait, of: peerID)
 		}
 	}
 
 	/// Retrieves all necessary data from disk. You should call this method as soon as possible after creating the `PersistedPeersController`.
-	public func loadInitialData() {
-		// we need to guarantee that all data is read before it is accessed afterwards,
-		// because our targetQueue > persistenceQueue model assumes that the data is succefully read
-		targetQueue.async { PersistedPeersController.persistenceQueue.sync {
-			self.loadLastReads()
-			self.loadPeers()
-			self.loadBios()
-		} }
+	public func loadInitialData()
+	throws -> ([PersistedPeerInfo], [PeerID : Date]) {
+		// important loads first
+
+		let nsLastSeenDates: NSDictionary? = unarchiveObjectFromUserDefs(
+			Self.LastSeenKey, containing: [NSUUID.self, NSDate.self])
+
+		let lsDates = nsLastSeenDates as? [PeerID : Date] ?? [PeerID : Date]()
+		self.lastSeenDates = lsDates
+
+		try self.loadPeers()
+		try self.loadBios()
+		try self.loadThumbnails()
+
+		return (
+			self.persistedPeers.map { peer in
+				PersistedPeerInfo(
+					peer: peer,
+					blob: self.persistedBlobs[peer.id.peerID] ?? PeerBlobData(),
+					lastSeen: lsDates[peer.id.peerID] ?? Date.distantPast)
+			},
+			lsDates)
 	}
 
-	/// Load portrait of `peerID` from disk and informs delegate afterwards.
-	public func loadPortrait(of peerID: PeerID) {
-		// TODO: prevent double work
-		// currently, we may load the same portrait over and over, either while it is still being load or even if it was already loaded succesfully once
-		// we would need to introduce a variable isLoadingPortrait per PeerID, which we would check and set on targetQueue before and after loading bzw. ne, sogar loading state: not loaded, loading, loaded
-		PersistedPeersController.persistenceQueue.async {
-			let url = self.pictureURL(of: peerID)
-			guard let provider = CGDataProvider(url: url as CFURL) else { return }
-			guard let image = CGImage(jpegDataProviderSource: provider, decode: nil, shouldInterpolate: true, intent: CGColorRenderingIntent.defaultIntent),
-				  let data = provider.data as Data? else {
-				elog("getting image or data from CGDataProvider failed.")
-				return
-			}
-
-			self.targetQueue.async {
-				self.persistedBlobs[peerID]?.portrait = image
-				self.delegate?.portraitLoadedFromDisk(image, of: peerID, hash: data.sha256())
-			}
+	/// Load portrait and hash of `peerID` from disk and informs delegate afterwards.
+	public func loadBlob(of peerID: PeerID) -> PeerBlobData? {
+		if let blob = self.persistedBlobs[peerID],
+		   blob.portrait != nil,
+		   blob.portraitHash.count > 0 {
+			return blob
 		}
+
+		let url = self.pictureURL(of: peerID)
+		guard let provider = CGDataProvider(url: url as CFURL) else { return nil }
+		guard let image = CGImage(jpegDataProviderSource: provider, decode: nil, shouldInterpolate: true, intent: CGColorRenderingIntent.defaultIntent),
+			  let data = provider.data as Data? else {
+			elog(Self.LogTag, "getting image or data from CGDataProvider failed.")
+			return nil
+		}
+
+		let hash = Data(SHA256.hash(data: data))
+
+		let result: PeerBlobData
+
+		if let blob = self.persistedBlobs[peerID] {
+			result = PeerBlobData(
+				biography: blob.biography, portraitHash: hash,
+				portrait: image, thumbnail: blob.thumbnail)
+		} else {
+			result = PeerBlobData(
+				portraitHash: hash, portrait: image, thumbnail: nil)
+		}
+
+		self.persistedBlobs[peerID] = result
+
+		return result
 	}
 
 	// MARK: - Private
 
 	// MARK: Static Constants
-	
-	/// File system access queue.
-	private static let persistenceQueue = DispatchQueue(label: "de.peeree.PersistedPeersController", qos: .background)
+
+	// Log tag.
+	private static let LogTag = "PersistedPeersController"
+
+	private static let LastSeenKey = "RecentPeersController.LastSeenKey"
 
 	// MARK: Constants
-	
-	/// The queue to access the in-memory data.
-	private let targetQueue: DispatchQueue
+
+	private let fileManager = FileManager()
 
 	/// Base file name for all files created by an instance of this class.
 	private let filename: String
@@ -201,44 +203,52 @@ public final class PersistedPeersController {
 		return URL(fileURLWithPath: paths[0]).appendingPathComponent("\(filename).bios.txt", isDirectory: false)
 	}
 
-	/// Locator of file containing all last read dates; thread-safe.
-	private var lastReadsURL: URL {
-		// Create a file path to our documents directory
-		let paths = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)
-		return URL(fileURLWithPath: paths[0]).appendingPathComponent("\(filename).lastReadEventIDs.json", isDirectory: false)
+	/// Locator of folder containing all thumbnails; thread-safe.
+	private var thumbnailBaseURL: URL {
+		let paths = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true)
+		return URL(fileURLWithPath: paths[0]).appendingPathComponent("\(filename).thumbnails", isDirectory: true)
 	}
 
 	/// Locator of file containing the portrait of `peerID` (if available); thread-safe.
-	private func pictureURL(of peerID: PeerID) -> URL {
+	internal nonisolated func pictureURL(of peerID: PeerID) -> URL {
 		// Create a file path to our documents directory
 		let paths = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)
 		return URL(fileURLWithPath: paths[0]).appendingPathComponent("\(filename).\(peerID.uuidString).jpeg", isDirectory: false)
 	}
 
-	/// All saved peer data; must be accessed on targetQueue.
-	private var persistedPeers = Set<Peer>()
+	/// Locator of file containing the portrait of `peerID` (if available); thread-safe.
+	private func thumbnailURL(of peerID: PeerID, base: URL) -> URL {
+		return base.appendingPathComponent("\(peerID.uuidString).jpeg", isDirectory: false)
+	}
 
 	/// All peristed optional peer data; must be accessed on targetQueue.
 	private var persistedBlobs = [PeerID : PeerBlobData]()
 
-	/// All persisted last read dates; must be accessed on targetQueue.
-	private var persistedLastReads = [PeerID : Date]()
-
 	// MARK: Methods
 
 	/// Retrieves all saved peers from disk; call from `persistenceQueue` only.
-	private func loadPeers() {
-		guard let data = FileManager.default.contents(atPath: self.peersURL.path) else { return }
+	private func loadPeers() throws {
+		guard let data = fileManager.contents(atPath: self.peersURL.path) else { return }
 
 		let decoder = JSONDecoder()
+
 		do {
 			let decodedPeers = try decoder.decode(Set<Peer>.self, from: data)
-			self.targetQueue.async {
-				self.persistedPeers = decodedPeers
-				self.delegate?.persistedPeersLoadedFromDisk(decodedPeers)
+			self.persistedPeers = decodedPeers
+		} catch {
+			wlog(
+				Self.LogTag, "Decoding persisted peers failed: \(error). " +
+				"Attempting migration from version 1.6.4")
+
+			let decodedPeers = try decoder.decode([Peer1_6_4].self, from: data)
+
+			// sanity check
+			try decodedPeers.forEach {
+				let m = $0.modernized()
+				_ = try m.id.publicKey()
 			}
-		} catch let error {
-			self.targetQueue.async { self.delegate?.decodingFailed(with: error) }
+
+			self.persistedPeers = Set(decodedPeers.map { $0.modernized() })
 		}
 	}
 
@@ -246,105 +256,102 @@ public final class PersistedPeersController {
 	 Retrieves all saved biographies from disk; call from `persistenceQueue` only.
 	 - Warning: This will overwrite possibly loaded portraits! You should always call it as soon as possible after creating the `PersistedPeersController`.
 	 */
-	private func loadBios() {
-		guard let data = FileManager.default.contents(atPath: self.biosURL.path) else { return }
+	private func loadBios() throws {
+		guard let data = fileManager.contents(atPath: self.biosURL.path) else { return }
 
 		let decoder = JSONDecoder()
-		do {
-			let decodedBios = try decoder.decode([PeerID : String].self, from: data)
-			self.targetQueue.async {
-				self.persistedBlobs = decodedBios.mapValues { bio in
-					PeerBlobData(biography: bio, portrait: nil)
-				}
-				self.delegate?.persistedBiosLoadedFromDisk(decodedBios)
-			}
-		} catch let error {
-			self.targetQueue.async { self.delegate?.decodingFailed(with: error) }
+		let decodedBios = try decoder.decode([PeerID : String].self, from: data)
+		self.persistedBlobs = decodedBios.mapValues { bio in
+			PeerBlobData(biography: bio, portrait: nil)
 		}
 	}
 
-	/// Retrieves all persisted last read dates from disk; call from `persistenceQueue` only.
-	private func loadLastReads() {
-		guard let data = FileManager.default.contents(atPath: self.lastReadsURL.path) else { return }
+	/**
+	 Retrieves all already calculated portrait thumbnails from disk; call from `persistenceQueue` only.
+	 */
+	private func loadThumbnails() throws {
+		guard let enumerator = fileManager.enumerator(atPath: self.thumbnailBaseURL.path) else { return }
 
-		let decoder = JSONDecoder()
-		do {
-			let decodedLastReads = try decoder.decode([PeerID : Date].self, from: data)
-			self.targetQueue.async {
-				self.persistedLastReads = decodedLastReads
-				self.delegate?.persistedLastReadsLoadedFromDisk(decodedLastReads)
+		var thumbnails = [PeerID : CGImage]()
+
+		enumerator.skipDescendants()
+		while let path = enumerator.nextObject() as? String {
+			let url = URL(fileURLWithPath: path, isDirectory: false)
+			let uuidString = url.deletingPathExtension().lastPathComponent
+
+			guard let peerID = PeerID(uuidString: uuidString),
+				  let provider = CGDataProvider(url: url as CFURL) else { continue }
+
+			guard let image = CGImage(jpegDataProviderSource: provider,
+									  decode: nil, shouldInterpolate: true,
+									  intent: CGColorRenderingIntent.defaultIntent) else {
+				elog(Self.LogTag, "getting image or data from CGDataProvider failed.")
+
+				try? fileManager.deleteFile(at: url)
+				continue
 			}
-		} catch let error {
-			self.targetQueue.async { self.delegate?.decodingFailed(with: error) }
+
+			thumbnails[peerID] = image
+		}
+
+		for entry in thumbnails {
+			if let blob = self.persistedBlobs[entry.key] {
+				self.persistedBlobs[entry.key] = PeerBlobData(biography: blob.biography, portraitHash: blob.portraitHash, portrait: blob.portrait, thumbnail: entry.value)
+			} else {
+				self.persistedBlobs[entry.key] = PeerBlobData(thumbnail: entry.value)
+			}
 		}
 	}
 
 	/// Persists an `Encodable` `Collection` at `url`.
-	private func save<EncodableCollection: Encodable>(_ save: EncodableCollection, at url: URL) where EncodableCollection: Collection {
-		PersistedPeersController.persistenceQueue.async {
-			do {
-				if save.isEmpty {
-					try self.deleteFile(at: url)
-				} else {
-					let jsonData = try JSONEncoder().encode(save)
-					if !FileManager.default.createFile(atPath: url.path, contents: jsonData, attributes: nil) {
-						self.targetQueue.async { self.delegate?.encodingFailed(with: createApplicationError(localizedDescription: "could not create file \(url.path)")) }
-					}
-				}
-			} catch let error {
-				self.targetQueue.async { self.delegate?.encodingFailed(with: error) }
+	private func save<EncodableCollection: Encodable>(_ save: EncodableCollection, at url: URL) throws where EncodableCollection: Collection {
+		if save.isEmpty {
+			try fileManager.deleteFile(at: url)
+		} else {
+			let jsonData = try JSONEncoder().encode(save)
+			guard fileManager.createFile(atPath: url.path, contents: jsonData, attributes: nil) else {
+				throw createApplicationError(localizedDescription: "could not create file \(url.path)")
 			}
 		}
 	}
 
 	/// Persists all peer data; must be accessed on targetQueue.
-	private func savePeers() {
+	private func savePeers() throws {
 		// create a copy of the value we want to save, still faster than the encoding
-		save(persistedPeers, at: peersURL)
+		try save(persistedPeers, at: peersURL)
 	}
 
 	/// Perists all bios on disk; must be accessed on targetQueue.
-	private func saveBios() {
+	private func saveBios() throws {
 		// create a copy of the value we want to save, still faster than the encoding
 		// note: this won't remove the entries for deleted peers, since the empty string is still persisted
-		save(persistedBlobs.mapValues { value in value.biography }, at: biosURL)
-	}
-
-	/// Perists all last read dates on disk; must be accessed on targetQueue.
-	private func saveLastReads() {
-		save(persistedLastReads, at: lastReadsURL)
+		try save(persistedBlobs.mapValues { value in value.biography }, at: biosURL)
 	}
 
 	/// Persists `portrait` on disk; call only from targetQueue.
-	private func save(portrait: CGImage?, of peerID: PeerID) {
-		// create a copy of the value we want to save, still faster than the encoding
-		PersistedPeersController.persistenceQueue.async {
-			do {
-				let url = self.pictureURL(of: peerID)
-				if let pic = portrait {
-					try pic.save(to: url, compressionQuality: StandardPortraitCompressionQuality)
-				} else {
-					try self.deleteFile(at: url)
-				}
-			} catch let error {
-				self.targetQueue.async { self.delegate?.encodingFailed(with: error) }
-			}
-		}
-	}
-
-	/// Purges a file from disk if it exists; call only from persistenceQueue.
-	private func deleteFile(at url: URL) throws {
-		let fileManager = FileManager.default
-		if fileManager.fileExists(atPath: url.path) {
-			try fileManager.removeItem(at: url)
+	private func save(portrait: CGImage?, of peerID: PeerID) throws {
+		let url = self.pictureURL(of: peerID)
+		if let pic = portrait {
+			try pic.save(to: url, compressionQuality: StandardPortraitCompressionQuality)
+		} else {
+			try fileManager.deleteFile(at: url)
 		}
 	}
 }
 
 /// All optional, large info a user configures, which is loaded in the background while the peer is already being presented.
-public struct PeerBlobData {
+public struct PeerBlobData: Sendable {
 	public var biography = ""
+	public var portraitHash = Data()
 	public var portrait: CGImage?
+	public var thumbnail: CGImage?
+}
+
+/// All persisted peer data
+public struct PersistedPeerInfo: Sendable {
+	public var peer: Peer
+	public var blob: PeerBlobData
+	public var lastSeen: Date
 }
 
 extension PeerBlobData {

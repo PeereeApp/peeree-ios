@@ -8,12 +8,13 @@
 
 import Foundation
 import KeychainWrapper
+import PeereeCore
 
 /// The JPEG compression quality when serializing portraits.
-let StandardPortraitCompressionQuality: CGFloat = 0.0
+public let StandardPortraitCompressionQuality: CGFloat = 0.0
 
 /// The Peeree identity of a user combined with their mandatory info.
-public struct Peer: Codable, Equatable {
+public struct Peer: Sendable, Codable, Equatable {
 	// MARK: - Public and Internal
 
 	/// Constructs a `Peer` with its properties.
@@ -23,25 +24,33 @@ public struct Peer: Codable, Equatable {
 	}
 
 	/// Constructs a `Peer` from its dismantled properties.
-	public init(peerID: PeerID, publicKey: AsymmetricPublicKey, nickname: String, gender: PeerInfo.Gender, age: Int?, hasPicture: Bool) {
-		self.init(id: PeereeIdentity(peerID: peerID, publicKey: publicKey),
+	public init(peerID: PeerID, publicKey: AsymmetricPublicKey,
+				nickname: String, gender: PeerInfo.Gender, age: Int?,
+				hasPicture: Bool) throws {
+		self.init(id: try PeereeIdentity(peerID: peerID, publicKey: publicKey),
 				  info: PeerInfo(nickname: nickname, gender: gender, age: age, hasPicture: hasPicture))
 	}
 
 	/// Constructs a `Peer` from the binary representations of its properties.
 	init?(peerID: PeerID, publicKeyData: Data, aggregateData: Data, nicknameData: Data) {
-		guard let id = try? PeereeIdentity(peerID: peerID, publicKeyData: publicKeyData),
-			  let pi = PeerInfo(aggregateData: aggregateData, nicknameData: nicknameData) else {
+		guard let pi = PeerInfo(aggregateData: aggregateData,
+								nicknameData: nicknameData) else {
 			return nil
 		}
 
-		self.id = id
+		self.id = PeereeIdentity(peerID: peerID, publicKeyData: publicKeyData)
 		info = pi
 	}
 
 	/// Constructs a `Peer` from the binary representations of its properties and the components of its `id`.
 	init?(peerID: PeerID, publicKey: AsymmetricPublicKey, aggregateData: Data, nicknameData: Data) {
-		id = PeereeIdentity(peerID: peerID, publicKey: publicKey)
+		if let theID = try? PeereeIdentity(peerID: peerID,
+										   publicKey: publicKey) {
+			id = theID
+		} else {
+			return nil
+		}
+
 		if let i = PeerInfo(aggregateData: aggregateData, nicknameData: nicknameData) {
 			info = i
 		} else {
@@ -94,7 +103,7 @@ extension Peer: Hashable {
 }
 
 /// All information a user may give about themselves.
-public struct PeerInfo: Codable {
+public struct PeerInfo: Codable, Sendable {
 	// MARK: - Public and Internal
 
 	/// Constructs a `PeerInfo` from its parts.
@@ -135,14 +144,13 @@ public struct PeerInfo: Codable {
 		}
 
 		// same as self.nicknameData = nicknameData
-		nickname = String(dataPrefixedEncoding: nicknameData) ?? ""
-		if nickname == "" { return nil }
+		self.nickname = String(dataPrefixedEncoding: nicknameData) ?? ""
 	}
 
 	// MARK: Classes, Structs, Enums
 
 	/// The available genders in the UI.
-	public enum Gender: String, CaseIterable, Codable {
+	public enum Gender: String, CaseIterable, Codable, Sendable {
 		case male, female, queer
 
 		/*
@@ -167,23 +175,6 @@ public struct PeerInfo: Codable {
 	public static let MaxEmailSize = 126
 	/// 1 non-extended BLE packet length would be 27. Since most devices seem to support extended packets, we chose something higher and cap it on the phy level
 	public static let MaxNicknameSize = 184
-	
-//	public struct AuthenticationStatus: OptionSet {
-//		public let rawValue: Int
-//
-//		/// we authenticated ourself to the peer
-//		public static let to	= AuthenticationStatus(rawValue: 1 << 0)
-//		/// the peer authenticated himself to us
-//		public static let from  = AuthenticationStatus(rawValue: 1 << 1)
-//
-//		public static let full: AuthenticationStatus = [.to, .from]
-//
-//		public init(rawValue: Int) {
-//			self.rawValue = rawValue
-//		}
-//	}
-
-//	var authenticationStatus: AuthenticationStatus = []
 
 	// MARK: Variables
 	
