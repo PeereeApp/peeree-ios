@@ -39,20 +39,24 @@ struct ChatTableCell: View {
 						}
 					}
 					.lineLimit(1)
+					.foregroundStyle(.secondary)
+					.accessibilityLabel(chatPersona.lastMessage?.message ?? NSLocalizedString("No messages.", comment: "Placeholder text"))
 			}
 
 			Spacer()
+				.accessibilityHidden(true)
 
 			if chatPersona.unreadMessages > 0 {
 				Text("\(chatPersona.unreadMessages)")
 					.font(.subheadline)
 					.fontWeight(.light)
-					.foregroundColor(.white)
+					.foregroundColor(Color("StaticText"))
 					.padding(12)
-					.background(Circle().fill(Color.blue))
+					.background(Circle().fill(Color("StaticBackgroundAnalogous")))
 			}
 		}
-		.padding()
+		.padding([.leading, .trailing, .bottom])
+		.accessibilityElement(children: .combine)
 	}
 }
 
